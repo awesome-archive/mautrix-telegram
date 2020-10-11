@@ -29,7 +29,7 @@ from .. import command_handler, CommandEvent, SECTION_ADMIN
 async def set_power_level(evt: CommandEvent) -> EventID:
     try:
         level = int(evt.args[0])
-    except KeyError:
+    except (KeyError, IndexError):
         return await evt.reply("**Usage:** `$cmdprefix+sp set-pl <level> [mxid]`")
     except ValueError:
         return await evt.reply("The level must be an integer.")
@@ -61,7 +61,7 @@ async def clear_db_cache(evt: CommandEvent) -> EventID:
         for puppet in pu.Puppet.by_custom_mxid.values():
             puppet.sync_task.cancel()
         pu.Puppet.by_custom_mxid = {}
-        await asyncio.gather(*[puppet.start() for puppet in pu.Puppet.all_with_custom_mxid()],
+        await asyncio.gather(*[puppet.try_start() for puppet in pu.Puppet.all_with_custom_mxid()],
                              loop=evt.loop)
         await evt.reply("Cleared puppet cache and restarted custom puppet syncers")
     elif section == "user":
@@ -86,7 +86,7 @@ async def reload_user(evt: CommandEvent) -> EventID:
     user = u.User.get_by_mxid(mxid, create=False)
     if not user:
         return await evt.reply("User not found")
-    puppet = pu.Puppet.get_by_custom_mxid(mxid)
+    puppet = await pu.Puppet.get_by_custom_mxid(mxid)
     if puppet:
         puppet.sync_task.cancel()
     await user.stop()

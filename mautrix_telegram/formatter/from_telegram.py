@@ -26,6 +26,7 @@ from telethon.tl.types import (MessageEntityMention, MessageEntityMentionName, M
                                MessageEntityBlockquote, MessageEntityStrike, MessageFwdHeader,
                                MessageEntityUnderline, PeerUser)
 from telethon.tl.custom import Message
+from telethon.errors import RPCError
 from telethon.helpers import add_surrogate, del_surrogate
 
 from mautrix.errors import MatrixRequestError
@@ -80,7 +81,7 @@ async def _add_forward_header(source: 'AbstractUser', content: TextMessageEventC
                 if user:
                     fwd_from_text = pu.Puppet.get_displayname(user, False)
                     fwd_from_html = f"<b>{escape(fwd_from_text)}</b>"
-            except ValueError:
+            except (ValueError, RPCError):
                 fwd_from_text = fwd_from_html = "unknown user"
     elif fwd_from.channel_id:
         portal = po.Portal.get_by_tgid(TelegramID(fwd_from.channel_id))
@@ -97,7 +98,7 @@ async def _add_forward_header(source: 'AbstractUser', content: TextMessageEventC
                 if channel:
                     fwd_from_text = f"channel {channel.title}"
                     fwd_from_html = f"channel <b>{escape(channel.title)}</b>"
-            except ValueError:
+            except (ValueError, RPCError):
                 fwd_from_text = fwd_from_html = "unknown channel"
     elif fwd_from.from_name:
         fwd_from_text = fwd_from.from_name
@@ -129,9 +130,10 @@ async def _add_reply_header(source: 'AbstractUser', content: TextMessageEventCon
         event: MessageEvent = await main_intent.get_event(msg.mx_room, msg.mxid)
         if isinstance(event.content, TextMessageEventContent):
             event.content.trim_reply_fallback()
-        content.set_reply(event)
+        puppet = await pu.Puppet.get_by_mxid(event.sender, create=False)
+        content.set_reply(event, displayname=puppet.displayname if puppet else event.sender)
     except MatrixRequestError:
-        pass
+        log.exception("Failed to get event to add reply fallback")
 
 
 async def telegram_to_matrix(evt: Message, source: "AbstractUser",

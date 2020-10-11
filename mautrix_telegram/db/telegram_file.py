@@ -13,13 +13,35 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from typing import Optional
+from typing import Optional, cast, Dict, Any
 
-from sqlalchemy import Column, ForeignKey, Integer, BigInteger, String, Boolean
+from sqlalchemy import (Column, ForeignKey, Integer, BigInteger, String, Boolean, Text,
+                        TypeDecorator)
 from sqlalchemy.engine.result import RowProxy
 
-from mautrix.types import ContentURI
-from mautrix.bridge.db import Base
+from mautrix.types import ContentURI, EncryptedFile
+from mautrix.util.db import Base
+
+
+class DBEncryptedFile(TypeDecorator):
+    impl = Text
+
+    @property
+    def python_type(self):
+        return EncryptedFile
+
+    def process_bind_param(self, value: EncryptedFile, dialect) -> Optional[str]:
+        if value is not None:
+            return value.json()
+        return None
+
+    def process_result_value(self, value: str, dialect) -> Optional[EncryptedFile]:
+        if value is not None:
+            return EncryptedFile.parse_json(value)
+        return None
+
+    def process_literal_param(self, value, dialect):
+        return value
 
 
 class TelegramFile(Base):
@@ -30,20 +52,19 @@ class TelegramFile(Base):
     mime_type: str = Column(String)
     was_converted: bool = Column(Boolean)
     timestamp: int = Column(BigInteger)
-    size: int = Column(Integer, nullable=True)
-    width: int = Column(Integer, nullable=True)
-    height: int = Column(Integer, nullable=True)
+    size: Optional[int] = Column(Integer, nullable=True)
+    width: Optional[int] = Column(Integer, nullable=True)
+    height: Optional[int] = Column(Integer, nullable=True)
+    decryption_info: Optional[Dict[str, Any]] = Column(DBEncryptedFile, nullable=True)
     thumbnail_id: str = Column("thumbnail", String, ForeignKey("telegram_file.id"), nullable=True)
     thumbnail: Optional['TelegramFile'] = None
 
     @classmethod
     def scan(cls, row: RowProxy) -> 'TelegramFile':
-        loc_id, mxc, mime, conv, ts, s, w, h, thumb_id = row
-        thumb = None
-        if thumb_id:
-            thumb = cls.get(thumb_id)
-        return cls(id=loc_id, mxc=mxc, mime_type=mime, was_converted=conv, timestamp=ts,
-                   size=s, width=w, height=h, thumbnail_id=thumb_id, thumbnail=thumb)
+        telegram_file = cast(TelegramFile, super().scan(row))
+        if isinstance(telegram_file.thumbnail, str):
+            telegram_file.thumbnail = cls.get(telegram_file.thumbnail)
+        return telegram_file
 
     @classmethod
     def get(cls, loc_id: str) -> Optional['TelegramFile']:
@@ -54,5 +75,5 @@ class TelegramFile(Base):
             conn.execute(self.t.insert().values(
                 id=self.id, mxc=self.mxc, mime_type=self.mime_type,
                 was_converted=self.was_converted, timestamp=self.timestamp, size=self.size,
-                width=self.width, height=self.height,
+                width=self.width, height=self.height, decryption_info=self.decryption_info,
                 thumbnail=self.thumbnail.id if self.thumbnail else self.thumbnail_id))

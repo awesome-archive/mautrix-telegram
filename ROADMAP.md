@@ -6,9 +6,9 @@
   * [x] Message edits
   * [ ] ‡ Message history
   * [x] Presence
-  * [x] Typing notifications
-  * [x] Read receipts
-  * [x] Pinning messages
+  * [x] Typing notifications*
+  * [x] Read receipts*
+  * [x] Pinning messages*
   * [x] Power level
     * [x] Normal chats
       * [ ] Non-hardcoded PL requirements
@@ -28,7 +28,10 @@
 	* [ ] Buttons
   * [x] Message deletions
   * [x] Message edits
-  * [ ] Message history
+  * [x] Message history
+    * [x] Manually (`!tg backfill`)
+    * [x] Automatically when creating portal
+    * [x] Automatically for missed messages
   * [x] Avatars
   * [x] Presence
   * [x] Typing notifications
@@ -50,11 +53,12 @@
     * [x] At startup
     * [x] When receiving invite or message
   * [x] Private chat creation by inviting Matrix puppet of Telegram user to new room
-  * [x] Option to use bot to relay messages for unauthenticated Matrix users
-  * [x] Option to use own Matrix account for messages sent from other Telegram clients
+  * [x] Option to use bot to relay messages for unauthenticated Matrix users (relaybot)
+  * [x] Option to use own Matrix account for messages sent from other Telegram clients (double puppeting)
   * [ ] ‡ Calls (hard, not yet supported by Telethon)
-  * [ ] ‡ Secret chats (not yet supported by Telethon)
-  * [ ] ‡ E2EE in Matrix rooms (not yet supported 
+  * [ ] ‡ Secret chats (i.e. End-to-bridge encryption on Telegram)
+  * [x] End-to-bridge encryption in Matrix rooms (see [wiki](https://github.com/tulir/mautrix-telegram/wiki/End%E2%80%90to%E2%80%90bridge-encryption))
 
+\* Requires [double puppeting](https://github.com/tulir/mautrix-telegram/wiki/Authentication#replacing-telegram-accounts-matrix-puppet-with-matrix-account) to be enabled  
 † Information not automatically sent from source, i.e. implementation may not be possible  
 ‡ Maybe, i.e. this feature may or may not be implemented at some point

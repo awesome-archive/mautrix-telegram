@@ -19,7 +19,7 @@ import logging
 from telethon.tl.patched import Message, MessageService
 from telethon.tl.types import (
     ChannelParticipantAdmin, ChannelParticipantCreator, ChatForbidden, ChatParticipantAdmin,
-    ChatParticipantCreator, InputChannel, InputUser, MessageActionChatAddUser,
+    ChatParticipantCreator, InputChannel, InputUser, MessageActionChatAddUser, PeerUser,
     MessageActionChatDeleteUser, MessageEntityBotCommand, PeerChannel, PeerChat, TypePeer,
     UpdateNewChannelMessage, UpdateNewMessage, MessageActionChatMigrateTo, User)
 from telethon.tl.functions.messages import GetChatsRequest, GetFullChatRequest
@@ -108,20 +108,20 @@ class Bot(AbstractUser):
             if isinstance(chat, ChatForbidden) or chat.left or chat.deactivated:
                 self.remove_chat(TelegramID(chat.id))
 
-        channel_ids = (InputChannel(chat_id, 0)
+        channel_ids = [InputChannel(chat_id, 0)
                        for chat_id, chat_type in self.chats.items()
-                       if chat_type == "channel")
+                       if chat_type == "channel"]
         for channel_id in channel_ids:
             try:
                 await self.client(GetChannelsRequest([channel_id]))
             except (ChannelPrivateError, ChannelInvalidError):
                 self.remove_chat(TelegramID(channel_id.channel_id))
 
-    def register_portal(self, portal: po.Portal) -> None:
+    async def register_portal(self, portal: po.Portal) -> None:
         self.add_chat(portal.tgid, portal.peer_type)
 
-    def unregister_portal(self, portal: po.Portal) -> None:
-        self.remove_chat(portal.tgid)
+    async def unregister_portal(self, tgid: int, tg_receiver: int) -> None:
+        self.remove_chat(tgid)
 
     def add_chat(self, chat_id: TelegramID, chat_type: str) -> None:
         if chat_id not in self.chats:
@@ -147,7 +147,7 @@ class Bot(AbstractUser):
         if self.whitelist_group_admins:
             if isinstance(chat, PeerChannel):
                 p = await self.client(GetParticipantRequest(chat, tgid))
-                return isinstance(p, (ChannelParticipantCreator, ChannelParticipantAdmin))
+                return isinstance(p.participant, (ChannelParticipantCreator, ChannelParticipantAdmin))
             elif isinstance(chat, PeerChat):
                 chat = await self.client(GetFullChatRequest(chat.chat_id))
                 participants = chat.full_chat.participants.participants
@@ -204,7 +204,12 @@ class Bot(AbstractUser):
         # chat is a normal group or a supergroup/channel when using the ID.
         if isinstance(message.to_id, PeerChannel):
             return reply(f"-100{message.to_id.channel_id}")
-        return reply(str(-message.to_id.chat_id))
+        elif isinstance(message.to_id, PeerChat):
+            return reply(str(-message.to_id.chat_id))
+        elif isinstance(message.to_id, PeerUser):
+            return reply(f"Your user ID is {message.from_id}.")
+        else:
+            return reply("Failed to find chat ID.")
 
     def match_command(self, text: str, command: str) -> bool:
         text = text.lower()
@@ -223,28 +228,36 @@ class Bot(AbstractUser):
 
     async def handle_command(self, message: Message) -> None:
         def reply(reply_text: str) -> Awaitable[Message]:
-            return self.client.send_message(message.to_id, reply_text, reply_to=message.id)
+            return self.client.send_message(message.chat_id, reply_text, reply_to=message.id)
 
         text = message.message
 
-        if self.match_command(text, "id"):
+        if self.match_command(text, "start"):
+            pcm = config["bridge.relaybot.private_chat.message"]
+            if pcm:
+                await reply(pcm)
+            return
+        elif self.match_command(text, "id"):
             await self.handle_command_id(message, reply)
+            return
+        elif message.is_private:
             return
 
         portal = po.Portal.get_by_entity(message.to_id)
 
-        if self.match_command(text, "portal"):
+        is_portal_cmd = self.match_command(text, "portal")
+        is_invite_cmd = self.match_command(text, "invite")
+        if is_portal_cmd or is_invite_cmd:
             if not await self.check_can_use_commands(message, reply):
                 return
-            await self.handle_command_portal(portal, reply)
-        elif self.match_command(text, "invite"):
-            if not await self.check_can_use_commands(message, reply):
-                return
-            try:
-                mxid = text[text.index(" ") + 1:]
-            except ValueError:
-                mxid = ""
-            await self.handle_command_invite(portal, reply, mxid_input=UserID(mxid))
+            if is_portal_cmd:
+                await self.handle_command_portal(portal, reply)
+            elif is_invite_cmd:
+                try:
+                    mxid = text[text.index(" ") + 1:]
+                except ValueError:
+                    mxid = ""
+                await self.handle_command_invite(portal, reply, mxid_input=UserID(mxid))
 
     def handle_service_message(self, message: MessageService) -> None:
         to_peer = message.to_id
@@ -275,10 +288,10 @@ class Bot(AbstractUser):
 
         is_command = (isinstance(update.message, Message)
                       and update.message.entities and len(update.message.entities) > 0
-                      and isinstance(update.message.entities[0], MessageEntityBotCommand))
+                      and isinstance(update.message.entities[0], MessageEntityBotCommand)
+                      and update.message.entities[0].offset == 0)
         if is_command:
             await self.handle_command(update.message)
-            return True
         return False
 
     def is_in_chat(self, peer_id) -> bool:

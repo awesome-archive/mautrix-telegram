@@ -1,5 +1,5 @@
 # mautrix-telegram - A Matrix-Telegram puppeting bridge
-# Copyright (C) 2019 Tulir Asokan
+# Copyright (C) 2020 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -24,8 +24,8 @@ from telethon.tl.types import (UserProfilePhoto, User, UpdateUserName, PeerUser,
 
 from mautrix.appservice import AppService, IntentAPI
 from mautrix.errors import MatrixRequestError
-from mautrix.bridge import CustomPuppetMixin
-from mautrix.types import UserID, SyncToken
+from mautrix.bridge import BasePuppet
+from mautrix.types import UserID, SyncToken, RoomID
 from mautrix.util.simple_template import SimpleTemplate
 
 from .types import TelegramID
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 config: Optional['Config'] = None
 
 
-class Puppet(CustomPuppetMixin):
+class Puppet(BasePuppet):
     log: logging.Logger = logging.getLogger("mau.puppet")
     az: AppService
     mx: 'MatrixHandler'
@@ -166,7 +166,7 @@ class Puppet(CustomPuppetMixin):
     def new_db_instance(self) -> DBPuppet:
         return DBPuppet(id=self.id, **self._fields)
 
-    def save(self) -> None:
+    async def save(self) -> None:
         self.db_instance.edit(**self._fields)
 
     @classmethod
@@ -194,7 +194,7 @@ class Puppet(CustomPuppetMixin):
             return ""
         whitespace = ("\t\n\r\v\f \u00a0\u034f\u180e\u2063\u202f\u205f\u2800\u3000\u3164\ufeff"
                       "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b"
-                      "\u200c\u200d\u200e\u200f")
+                      "\u200c\u200d\u200e\u200f\ufe0f")
         name = "".join(c for c in name.strip(whitespace) if unicodedata.category(c) != 'Cf')
         return name
 
@@ -226,43 +226,52 @@ class Puppet(CustomPuppetMixin):
             return name
         return cls.displayname_template.format_full(name)
 
+    async def try_update_info(self, source: 'AbstractUser', info: User) -> None:
+        try:
+            await self.update_info(source, info)
+        except Exception:
+            source.log.exception(f"Failed to update info of {self.tgid}")
+
     async def update_info(self, source: 'AbstractUser', info: User) -> None:
-        if self.disable_updates:
-            return
         changed = False
         if self.username != info.username:
             self.username = info.username
             changed = True
 
-        try:
-            changed = await self.update_displayname(source, info) or changed
-            if isinstance(info.photo, UserProfilePhoto):
+        if not self.disable_updates:
+            try:
+                changed = await self.update_displayname(source, info) or changed
                 changed = await self.update_avatar(source, info.photo) or changed
-        except Exception:
-            self.log.exception(f"Failed to update info from source {source.tgid}")
+            except Exception:
+                self.log.exception(f"Failed to update info from source {source.tgid}")
 
         self.is_bot = info.bot
 
         if changed:
-            self.save()
+            await self.save()
 
     async def update_displayname(self, source: 'AbstractUser', info: Union[User, UpdateUserName]
                                  ) -> bool:
         if self.disable_updates:
             return False
-        allow_source = (source.is_relaybot
-                        or self.displayname_source == source.tgid
-                        # No displayname source, so just trust anything
-                        or self.displayname_source is None
-                        # No phone -> not in contact list -> can't set custom name
-                        or (isinstance(info, User) and info.phone is None))
-        if not allow_source:
+        if source.is_relaybot or source.is_bot:
+            allow_because = "user is bot"
+        elif self.displayname_source == source.tgid:
+            allow_because = "user is the primary source"
+        elif not info.contact:
+            allow_because = "user is not a contact"
+        elif self.displayname_source is None:
+            allow_because = "no primary source set"
+        else:
             return False
-        elif isinstance(info, UpdateUserName):
+
+        if isinstance(info, UpdateUserName):
             info = await source.client.get_entity(PeerUser(self.tgid))
 
         displayname = self.get_displayname(info)
         if displayname != self.displayname:
+            self.log.debug(f"Updating displayname of {self.id} (src: {source.tgid}, allowed "
+                           f"because {allow_because}) from {self.displayname} to {displayname}")
             self.displayname = displayname
             self.displayname_source = source.tgid
             try:
@@ -283,10 +292,15 @@ class Puppet(CustomPuppetMixin):
         if self.disable_updates:
             return False
 
-        if isinstance(photo, UserProfilePhotoEmpty):
+        if photo is None or isinstance(photo, UserProfilePhotoEmpty):
             photo_id = ""
-        else:
+        elif isinstance(photo, UserProfilePhoto):
             photo_id = str(photo.photo_id)
+        else:
+            self.log.warning(f"Unknown user profile photo type: {type(photo)}")
+            return False
+        if not photo_id and not config["bridge.allow_avatar_remove"]:
+            return False
         if self.photo_id != photo_id:
             if not photo_id:
                 self.photo_id = ""
@@ -314,6 +328,10 @@ class Puppet(CustomPuppetMixin):
                 return True
         return False
 
+    def default_puppet_should_leave_room(self, room_id: RoomID) -> bool:
+        portal: p.Portal = p.Portal.get_by_mxid(room_id)
+        return portal and not portal.backfill_lock.locked and portal.peer_type != "user"
+
     # endregion
     # region Getters
 
@@ -336,7 +354,7 @@ class Puppet(CustomPuppetMixin):
         return None
 
     @classmethod
-    def get_by_mxid(cls, mxid: UserID, create: bool = True) -> Optional['Puppet']:
+    def deprecated_sync_get_by_mxid(cls, mxid: UserID, create: bool = True) -> Optional['Puppet']:
         tgid = cls.get_id_from_mxid(mxid)
         if tgid:
             return cls.get(tgid, create)
@@ -344,7 +362,11 @@ class Puppet(CustomPuppetMixin):
         return None
 
     @classmethod
-    def get_by_custom_mxid(cls, mxid: UserID) -> Optional['Puppet']:
+    async def get_by_mxid(cls, mxid: UserID, create: bool = True) -> Optional['Puppet']:
+        return cls.deprecated_sync_get_by_mxid(mxid, create)
+
+    @classmethod
+    def deprecated_sync_get_by_custom_mxid(cls, mxid: UserID) -> Optional['Puppet']:
         if not mxid:
             raise ValueError("Matrix ID can't be empty")
 
@@ -361,8 +383,12 @@ class Puppet(CustomPuppetMixin):
         return None
 
     @classmethod
+    async def get_by_custom_mxid(cls, mxid: UserID) -> Optional['Puppet']:
+        return cls.deprecated_sync_get_by_custom_mxid(mxid)
+
+    @classmethod
     def all_with_custom_mxid(cls) -> Iterable['Puppet']:
-        return (cls.by_custom_mxid[puppet.mxid]
+        return (cls.by_custom_mxid[puppet.custom_mxid]
                 if puppet.custom_mxid in cls.by_custom_mxid
                 else cls.from_db(puppet)
                 for puppet in DBPuppet.all_with_custom_mxid())
@@ -380,8 +406,10 @@ class Puppet(CustomPuppetMixin):
         if not username:
             return None
 
+        username = username.lower()
+
         for _, puppet in cls.cache.items():
-            if puppet.username and puppet.username.lower() == username.lower():
+            if puppet.username and puppet.username.lower() == username:
                 return puppet
 
         dbpuppet = DBPuppet.get_by_username(username)
@@ -418,4 +446,8 @@ def init(context: 'Context') -> Iterable[Awaitable[Any]]:
     Puppet.displayname_template = SimpleTemplate(config["bridge.displayname_template"],
                                                  "displayname")
 
-    return (puppet.start() for puppet in Puppet.all_with_custom_mxid())
+    secret = config["bridge.login_shared_secret"]
+    Puppet.login_shared_secret = secret.encode("utf-8") if secret else None
+    Puppet.login_device_name = "Telegram Bridge"
+
+    return (puppet.try_start() for puppet in Puppet.all_with_custom_mxid())

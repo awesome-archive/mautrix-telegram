@@ -1,5 +1,5 @@
 # mautrix-telegram - A Matrix-Telegram puppeting bridge
-# Copyright (C) 2019 Tulir Asokan
+# Copyright (C) 2020 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,24 +13,28 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from typing import (Awaitable, Dict, List, Iterable, NewType, Optional, Tuple, Any, cast,
+from typing import (Awaitable, Dict, List, Iterable, NamedTuple, Optional, Tuple, Any, cast,
                     TYPE_CHECKING)
 import logging
 import asyncio
 
 from telethon.tl.types import (TypeUpdate, UpdateNewMessage, UpdateNewChannelMessage, PeerUser,
-                               UpdateShortChatMessage, UpdateShortMessage, User as TLUser, Chat)
+                               UpdateShortChatMessage, UpdateShortMessage, User as TLUser, Chat,
+                               ChatForbidden)
+from telethon.tl.custom import Dialog
 from telethon.tl.types.contacts import ContactsNotModified
 from telethon.tl.functions.contacts import GetContactsRequest, SearchRequest
 from telethon.tl.functions.account import UpdateStatusRequest
 
 from mautrix.client import Client
 from mautrix.errors import MatrixRequestError
-from mautrix.types import UserID
+from mautrix.types import UserID, RoomID
 from mautrix.bridge import BaseUser
+from mautrix.util.logging import TraceLogger
+from mautrix.util.opt_prometheus import Enum
 
 from .types import TelegramID
-from .db import User as DBUser
+from .db import User as DBUser, Portal as DBPortal
 from .abstract_user import AbstractUser
 from . import portal as po, puppet as pu
 
@@ -40,11 +44,16 @@ if TYPE_CHECKING:
 
 config: Optional['Config'] = None
 
-SearchResult = NewType('SearchResult', Tuple['pu.Puppet', int])
+SearchResult = NamedTuple('SearchResult', puppet='pu.Puppet', similarity=int)
+
+METRIC_LOGGED_IN = Enum('bridge_logged_in', 'Bridge Logged in', states=["true", "false"],
+                        labelnames=("tgid",))
+METRIC_CONNECTED = Enum('bridge_connected', 'Bridge Connected', states=["true", "false"],
+                        labelnames=("tgid",))
 
 
 class User(AbstractUser, BaseUser):
-    log: logging.Logger = logging.getLogger("mau.user")
+    log: TraceLogger = logging.getLogger("mau.user")
     by_mxid: Dict[str, 'User'] = {}
     by_tgid: Dict[int, 'User'] = {}
 
@@ -76,6 +85,7 @@ class User(AbstractUser, BaseUser):
         self.db_portals = db_portals or []
         self._db_instance = db_instance
         self._ensure_started_lock = asyncio.Lock()
+        self.dm_update_lock = asyncio.Lock()
 
         self.command_status = None
 
@@ -149,7 +159,7 @@ class User(AbstractUser, BaseUser):
         return DBUser(mxid=self.mxid, tgid=self.tgid, tg_username=self.username,
                       saved_contacts=self.saved_contacts, portals=self.db_portals)
 
-    def save(self, contacts: bool = False, portals: bool = False) -> None:
+    async def save(self, contacts: bool = False, portals: bool = False) -> None:
         self.db_instance.edit(tgid=self.tgid, tg_username=self.username, tg_phone=self.phone,
                               saved_contacts=self.saved_contacts)
         if contacts:
@@ -175,6 +185,12 @@ class User(AbstractUser, BaseUser):
     # endregion
     # region Telegram connection management
 
+    async def try_ensure_started(self) -> None:
+        try:
+            await self.ensure_started()
+        except Exception:
+            self.log.exception("Exception in ensure_started")
+
     async def ensure_started(self, even_if_no_session=False) -> 'User':
         if not self.puppet_whitelisted or self.connected:
             return self
@@ -183,23 +199,44 @@ class User(AbstractUser, BaseUser):
 
     async def start(self, delete_unless_authenticated: bool = False) -> 'User':
         await super().start()
+        METRIC_CONNECTED.labels(tgid=self.tgid).state("true")
         if await self.is_logged_in():
             self.log.debug(f"Ensuring post_login() for {self.name}")
             asyncio.ensure_future(self.post_login(), loop=self.loop)
         elif delete_unless_authenticated:
             self.log.debug(f"Unauthenticated user {self.name} start()ed, deleting session...")
             await self.client.disconnect()
+            METRIC_CONNECTED.labels(tgid=self.tgid).state("false")
             self.client.session.delete()
         return self
 
-    async def post_login(self, info: TLUser = None) -> None:
+    async def stop(self) -> None:
+        await super().stop()
+        METRIC_CONNECTED.labels(tgid=self.tgid).state("true")
+
+    async def post_login(self, info: TLUser = None, first_login: bool = False) -> None:
         try:
             await self.update_info(info)
-            if not self.is_bot and config["bridge.startup_sync"]:
+        except Exception:
+            self.log.exception("Failed to update telegram account info")
+            return
+
+        METRIC_LOGGED_IN.labels(tgid=self.tgid).state("true")
+
+        try:
+            puppet = pu.Puppet.get(self.tgid)
+            if puppet.custom_mxid != self.mxid and puppet.can_auto_login(self.mxid):
+                self.log.info(f"Automatically enabling custom puppet")
+                await puppet.switch_mxid(access_token="auto", mxid=self.mxid)
+        except Exception:
+            self.log.exception("Failed to automatically enable custom puppet")
+
+        if not self.is_bot and config["bridge.startup_sync"]:
+            try:
                 await self.sync_dialogs()
                 await self.sync_contacts()
-        except Exception:
-            self.log.exception("Failed to run post-login functions for %s", self.mxid)
+            except Exception:
+                self.log.exception("Failed to run post-login sync")
 
     async def update(self, update: TypeUpdate) -> bool:
         if not self.is_bot:
@@ -213,15 +250,17 @@ class User(AbstractUser, BaseUser):
             else:
                 portal = po.Portal.get_by_entity(message.to_id, receiver_id=self.tgid)
         elif isinstance(update, UpdateShortChatMessage):
-            portal = po.Portal.get_by_tgid(TelegramID(update.chat_id), peer_type="chat")
+            portal = po.Portal.get_by_tgid(TelegramID(update.chat_id))
         elif isinstance(update, UpdateShortMessage):
             portal = po.Portal.get_by_tgid(TelegramID(update.user_id), self.tgid, "user")
         else:
             return False
 
         if portal:
-            self.register_portal(portal)
+            await self.register_portal(portal)
+            return False
 
+        # Don't bother handling the update
         return True
 
     # endregion
@@ -247,7 +286,7 @@ class User(AbstractUser, BaseUser):
             self.tgid = TelegramID(info.id)
             self.by_tgid[self.tgid] = self
         if changed:
-            self.save()
+            await self.save()
 
     async def log_out(self) -> bool:
         puppet = pu.Puppet.get(self.tgid)
@@ -263,18 +302,19 @@ class User(AbstractUser, BaseUser):
                 pass
         self.portals = {}
         self.contacts = []
-        self.save(portals=True, contacts=True)
+        await self.save(portals=True, contacts=True)
         if self.tgid:
             try:
                 del self.by_tgid[self.tgid]
             except KeyError:
                 pass
             self.tgid = None
-            self.save()
+            await self.save()
         ok = await self.client.log_out()
         if not ok:
             return False
         self.delete()
+        METRIC_LOGGED_IN.labels(tgid=self.tgid).state("false")
         return True
 
     def _search_local(self, query: str, max_results: int = 5, min_similarity: int = 45
@@ -283,7 +323,7 @@ class User(AbstractUser, BaseUser):
         for contact in self.contacts:
             similarity = contact.similarity(query)
             if similarity >= min_similarity:
-                results.append(SearchResult((contact, similarity)))
+                results.append(SearchResult(contact, similarity))
         results.sort(key=lambda tup: tup[1], reverse=True)
         return results[0:max_results]
 
@@ -295,7 +335,7 @@ class User(AbstractUser, BaseUser):
         for user in server_results.users:
             puppet = pu.Puppet.get(user.id)
             await puppet.update_info(self, user)
-            results.append(SearchResult((puppet, puppet.similarity(query))))
+            results.append(SearchResult(puppet, puppet.similarity(query)))
         results.sort(key=lambda tup: tup[1], reverse=True)
         return results[0:max_results]
 
@@ -310,42 +350,75 @@ class User(AbstractUser, BaseUser):
 
         return await self._search_remote(query), True
 
-    async def sync_dialogs(self, synchronous_create: bool = False) -> None:
+    async def _catch(self, action: str, task: asyncio.Task) -> None:
+        try:
+            await task
+        except Exception:
+            self.log.exception(f"Error while {action}")
+
+    async def get_direct_chats(self) -> Dict[UserID, List[RoomID]]:
+        return {
+            pu.Puppet.get_mxid_from_id(portal.tgid): [portal.mxid]
+            for portal in DBPortal.find_private_chats(self.tgid)
+            if portal.mxid
+        }
+
+    async def sync_dialogs(self) -> None:
         if self.is_bot:
             return
         creators = []
-        limit = config["bridge.sync_dialog_limit"] or None
-        self.log.debug(f"Syncing dialogs (limit={limit}, synchronous_create={synchronous_create})")
-        async for dialog in self.client.iter_dialogs(limit=limit, ignore_migrated=True,
+        update_limit = config["bridge.sync_update_limit"] or None
+        create_limit = config["bridge.sync_create_limit"]
+        index = 0
+        self.log.debug(f"Syncing dialogs (update_limit={update_limit}, "
+                       f"create_limit={create_limit})")
+        dialog: Dialog
+        async for dialog in self.client.iter_dialogs(limit=update_limit, ignore_migrated=True,
                                                      archived=False):
             entity = dialog.entity
-            if isinstance(entity, Chat) and (entity.deactivated or entity.left):
+            if isinstance(entity, ChatForbidden):
+                self.log.warning(f"Ignoring forbidden chat {entity} while syncing")
+                continue
+            elif isinstance(entity, Chat) and (entity.deactivated or entity.left):
                 self.log.warning(f"Ignoring deactivated or left chat {entity} while syncing")
                 continue
             elif isinstance(entity, TLUser) and not config["bridge.sync_direct_chats"]:
+                self.log.trace(f"Ignoring user {entity.id} while syncing")
                 continue
-            portal = po.Portal.get_by_entity(entity)
+            portal = po.Portal.get_by_entity(entity, receiver_id=self.tgid)
             self.portals[portal.tgid_full] = portal
-            creators.append(
-                portal.create_matrix_room(self, entity, invites=[self.mxid],
-                                          synchronous=synchronous_create))
-        self.save(portals=True)
-        await asyncio.gather(*creators, loop=self.loop)
+            if portal.mxid:
+                update_task = portal.update_matrix_room(self, entity)
+                backfill_task = portal.backfill(self, last_id=dialog.message.id)
+                creators.append(self._catch(f"updating {portal.tgid_log}",
+                                            self.loop.create_task(update_task)))
+                creators.append(self._catch(f"backfilling {portal.tgid_log}",
+                                            self.loop.create_task(backfill_task)))
+            elif not create_limit or index < create_limit:
+                create_task = portal.create_matrix_room(self, entity, invites=[self.mxid])
+                creators.append(self._catch(f"creating {portal.tgid_log}",
+                                            self.loop.create_task(create_task)))
+            index += 1
+        await self.save(portals=True)
+        await asyncio.gather(*creators)
+        await self.update_direct_chats()
         self.log.debug("Dialog syncing complete")
 
-    def register_portal(self, portal: po.Portal) -> None:
+    async def register_portal(self, portal: po.Portal) -> None:
+        self.log.trace(f"Registering portal {portal.tgid_full}")
         try:
             if self.portals[portal.tgid_full] == portal:
                 return
         except KeyError:
             pass
         self.portals[portal.tgid_full] = portal
-        self.save(portals=True)
+        await self.save(portals=True)
 
-    def unregister_portal(self, portal: po.Portal) -> None:
+    async def unregister_portal(self, tgid: int, tg_receiver: int) -> None:
+        self.log.trace(f"Unregistering portal {(tgid, tg_receiver)}")
         try:
-            del self.portals[portal.tgid_full]
-            self.save(portals=True)
+            del self.portals[(tgid, tg_receiver)]
+            await self.save(portals=True)
         except KeyError:
             pass
 
@@ -370,7 +443,7 @@ class User(AbstractUser, BaseUser):
             puppet = pu.Puppet.get(user.id)
             await puppet.update_info(self, user)
             self.contacts.append(puppet)
-        self.save(contacts=True)
+        await self.save(contacts=True)
 
     # endregion
     # region Class instance lookup
@@ -416,8 +489,10 @@ class User(AbstractUser, BaseUser):
         if not username:
             return None
 
+        username = username.lower()
+
         for _, user in cls.by_tgid.items():
-            if user.username and user.username.lower() == username.lower():
+            if user.username and user.username.lower() == username:
                 return user
 
         puppet = DBUser.get_by_username(username)
@@ -431,6 +506,7 @@ class User(AbstractUser, BaseUser):
 def init(context: 'Context') -> Iterable[Awaitable['User']]:
     global config
     config = context.config
+    User.bridge = context.bridge
 
-    return (User.from_db(db_user).ensure_started()
+    return (User.from_db(db_user).try_ensure_started()
             for db_user in DBUser.all_with_tgid())

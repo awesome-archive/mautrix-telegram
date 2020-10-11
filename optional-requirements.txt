@@ -1,5 +1,30 @@
-cryptg
-Pillow
-moviepy
-prometheus_client
-psycopg2-binary
+# Format: #/name defines a new extras_require group called name
+# Uncommented lines after the group definition insert things into that group.
+
+#/speedups
+cryptg>=0.1,<0.3
+cchardet
+aiodns
+brotli
+
+#/webp_convert
+pillow>=4,<8
+
+#/qr_login
+pillow>=4,<8
+qrcode>=6,<7
+
+#/hq_thumbnails
+moviepy>=1,<2
+
+#/metrics
+prometheus_client>=0.6,<0.9
+
+#/postgres
+psycopg2-binary>=2,<3
+
+#/e2be
+asyncpg>=0.20,<0.22
+python-olm>=3,<4
+pycryptodome>=3,<4
+unpaddedbase64>=1,<2

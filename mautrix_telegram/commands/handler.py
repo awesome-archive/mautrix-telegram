@@ -18,7 +18,7 @@ from typing import Awaitable, Callable, List, Optional, NamedTuple, Any
 
 from telethon.errors import FloodWaitError
 
-from mautrix.types import RoomID, EventID
+from mautrix.types import RoomID, EventID, MessageEventContent
 from mautrix.bridge.commands import (HelpSection, CommandEvent as BaseCommandEvent,
                                      CommandHandler as BaseCommandHandler,
                                      CommandProcessor as BaseCommandProcessor,
@@ -42,14 +42,18 @@ class CommandEvent(BaseCommandEvent):
     sender: u.User
 
     def __init__(self, processor: 'CommandProcessor', room_id: RoomID, event_id: EventID,
-                 sender: u.User, command: str, args: List[str], is_management: bool,
-                 is_portal: bool) -> None:
-        super().__init__(processor, room_id, event_id, sender, command, args, is_management,
-                         is_portal)
+                 sender: u.User, command: str, args: List[str], content: MessageEventContent,
+                 is_management: bool, is_portal: bool) -> None:
+        super().__init__(processor, room_id, event_id, sender, command, args, content,
+                         is_management, is_portal)
         self.bridge = processor.bridge
         self.tgbot = processor.tgbot
         self.config = processor.config
         self.public_website = processor.public_website
+
+    @property
+    def print_error_traceback(self) -> bool:
+        return self.sender.is_admin
 
     async def get_help_key(self) -> HelpCacheKey:
         return HelpCacheKey(self.is_management, self.is_portal, self.sender.puppet_whitelisted,
@@ -69,7 +73,7 @@ class CommandHandler(BaseCommandHandler):
     def __init__(self, handler: Callable[[CommandEvent], Awaitable[EventID]],
                  management_only: bool, name: str, help_text: str, help_args: str,
                  help_section: HelpSection, needs_auth: bool, needs_puppeting: bool,
-                 needs_matrix_puppeting: bool, needs_admin: bool,) -> None:
+                 needs_matrix_puppeting: bool, needs_admin: bool) -> None:
         super().__init__(handler, management_only, name, help_text, help_args, help_section,
                          needs_auth=needs_auth, needs_puppeting=needs_puppeting,
                          needs_matrix_puppeting=needs_matrix_puppeting, needs_admin=needs_admin)
@@ -111,8 +115,7 @@ def command_handler(_func: Optional[CommandHandlerFunc] = None, *, needs_auth: b
 
 class CommandProcessor(BaseCommandProcessor):
     def __init__(self, context: c.Context) -> None:
-        super().__init__(az=context.az, config=context.config, event_class=CommandEvent,
-                         loop=context.loop)
+        super().__init__(event_class=CommandEvent, bridge=context.bridge)
         self.tgbot = context.bot
         self.bridge = context.bridge
         self.az, self.config, self.loop, self.tgbot = context.core

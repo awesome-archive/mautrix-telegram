@@ -149,11 +149,9 @@ class ProvisioningAPI(AuthAPI):
             force = request.query.get("force", None)
             if force in ("delete", "unbridge"):
                 delete = force == "delete"
-                await portal.cleanup_room(portal.main_intent, portal.mxid, puppets_only=not delete,
-                                          message=("Portal deleted (moving to another room)"
-                                                   if delete
-                                                   else "Room unbridged (portal moving to another "
-                                                        "room)"))
+                await portal.cleanup_portal("Portal deleted (moving to another room)" if delete
+                                            else "Room unbridged (portal moving to another room)",
+                                            puppets_only=not delete)
             else:
                 return self.get_error_response(409, "chat_already_bridged",
                                                "Telegram chat is already bridged to another "
@@ -185,7 +183,7 @@ class ProvisioningAPI(AuthAPI):
         portal.mxid = room_id
         portal.title, portal.about, levels = await get_initial_state(self.az.intent, room_id)
         portal.photo_id = ""
-        portal.save()
+        await portal.save()
 
         asyncio.ensure_future(portal.update_matrix_room(user, entity, direct, levels=levels),
                               loop=self.loop)
@@ -317,9 +315,9 @@ class ProvisioningAPI(AuthAPI):
 
         if not user.is_bot:
             return web.json_response([{
-                "id": get_peer_id(chat),
+                "id": chat.id,
                 "title": chat.title,
-            } async for chat in user.client.get_dialogs(ignore_migrated=True, archived=False)])
+            } async for chat in user.client.iter_dialogs(ignore_migrated=True, archived=False)])
         else:
             return web.json_response([{
                 "id": get_peer_id(chat.peer),
@@ -357,6 +355,7 @@ class ProvisioningAPI(AuthAPI):
         if err is not None:
             return err
         await user.log_out()
+        return web.json_response({}, status=200)
 
     async def bridge_info(self, request: web.Request) -> web.Response:
         return web.json_response({

@@ -7,9 +7,22 @@
 
 A Matrix-Telegram hybrid puppeting/relaybot bridge.
 
-### [Wiki](https://github.com/tulir/mautrix-telegram/wiki)
+## Sponsors
+* [Joel Lehtonen / Zouppen](https://github.com/zouppen)
 
-### [Features & Roadmap](https://github.com/tulir/mautrix-telegram/blob/master/ROADMAP.md)
+### Wiki
+All setup and usage instructions are located in the GitHub
+[wiki](https://github.com/tulir/mautrix-telegram/wiki). Some quick links:
+
+* [Bridge setup](https://github.com/tulir/mautrix-telegram/wiki/Bridge-setup)
+  (or [with Docker](https://github.com/tulir/mautrix-telegram/wiki/Bridge-setup-with-Docker))
+* Basic usage: [Authentication](https://github.com/tulir/mautrix-telegram/wiki/Authentication),
+  [Creating chats](https://github.com/tulir/mautrix-telegram/wiki/Creating-and-managing-chats),
+  [Relaybot setup](https://github.com/tulir/mautrix-telegram/wiki/Relay-bot)
+
+### Features & Roadmap
+[ROADMAP.md](https://github.com/tulir/mautrix-telegram/blob/master/ROADMAP.md)
+contains a general overview of what is supported by the bridge.
 
 ## Discussion
 Matrix room: [`#telegram:maunium.net`](https://matrix.to/#/#telegram:maunium.net)
@@ -17,4 +30,4 @@ Matrix room: [`#telegram:maunium.net`](https://matrix.to/#/#telegram:maunium.net
 Telegram chat: [`mautrix_telegram`](https://t.me/mautrix_telegram) (bridged to Matrix room)
 
 ## Preview
-![Preview](https://raw.githubusercontent.com/tulir/mautrix-telegram/master/preview.png)
+![Preview](preview.png)

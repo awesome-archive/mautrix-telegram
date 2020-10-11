@@ -119,7 +119,7 @@ class AuthAPI(abc.ABC):
         existing_user = User.get_by_tgid(user_info.id)
         if existing_user and existing_user != user:
             await existing_user.log_out()
-        asyncio.ensure_future(user.post_login(user_info), loop=self.loop)
+        asyncio.ensure_future(user.post_login(user_info, first_login=True), loop=self.loop)
         if user.command_status and user.command_status["action"] == "Login":
             user.command_status = None
 
@@ -167,9 +167,13 @@ class AuthAPI(abc.ABC):
                         "next": enter_password,
                         "action": "Login (password entry)",
                     }
+                message = (
+                    "Code accepted, but you have 2-factor "
+                    "authentication enabled. Please enter your password."
+                )
                 return self.get_login_response(
-                    mxid=user.mxid, state="password", status=202,
-                    message="Code accepted, but you have 2-factor authentication is enabled.")
+                    mxid=user.mxid, state="password", status=202, message=message
+                )
             return None
         except Exception:
             self.log.exception("Error sending phone code")

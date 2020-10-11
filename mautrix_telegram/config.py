@@ -1,5 +1,5 @@
 # mautrix-telegram - A Matrix-Telegram puppeting bridge
-# Copyright (C) 2019 Tulir Asokan
+# Copyright (C) 2020 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -19,7 +19,8 @@ import os
 
 from mautrix.types import UserID
 from mautrix.client import Client
-from mautrix.bridge.config import BaseBridgeConfig, ConfigUpdateHelper
+from mautrix.bridge.config import (BaseBridgeConfig, ConfigUpdateHelper, ForbiddenKey,
+                                   ForbiddenDefault)
 
 Permissions = NamedTuple("Permissions", relaybot=bool, user=bool, puppeting=bool,
                          matrix_puppeting=bool, admin=bool, level=str)
@@ -32,24 +33,32 @@ class Config(BaseBridgeConfig):
         except KeyError:
             return super().__getitem__(key)
 
+    @property
+    def forbidden_defaults(self) -> List[ForbiddenDefault]:
+        return [
+            *super().forbidden_defaults,
+            ForbiddenDefault("appservice.public.external", "https://example.com/public",
+                             condition="appservice.public.enabled"),
+            ForbiddenDefault("bridge.permissions", ForbiddenKey("example.com")),
+            ForbiddenDefault("telegram.api_id", 12345),
+            ForbiddenDefault("telegram.api_hash", "tjyd5yge35lbodk1xwzw2jstp90k55qz"),
+        ]
+
     def do_update(self, helper: ConfigUpdateHelper) -> None:
+        super().do_update(helper)
         copy, copy_dict, base = helper
 
-        copy("homeserver.address")
-        copy("homeserver.domain")
-        copy("homeserver.verify_ssl")
+        copy("homeserver.asmux")
 
         if "appservice.protocol" in self and "appservice.address" not in self:
             protocol, hostname, port = (self["appservice.protocol"], self["appservice.hostname"],
                                         self["appservice.port"])
             base["appservice.address"] = f"{protocol}://{hostname}:{port}"
-        else:
-            copy("appservice.address")
-        copy("appservice.hostname")
-        copy("appservice.port")
-        copy("appservice.max_body_size")
-
-        copy("appservice.database")
+        if "appservice.debug" in self and "logging" not in self:
+            level = "DEBUG" if self["appservice.debug"] else "INFO"
+            base["logging.root.level"] = level
+            base["logging.loggers.mau.level"] = level
+            base["logging.loggers.telethon.level"] = level
 
         copy("appservice.public.enabled")
         copy("appservice.public.prefix")
@@ -61,15 +70,7 @@ class Config(BaseBridgeConfig):
         if base["appservice.provisioning.shared_secret"] == "generate":
             base["appservice.provisioning.shared_secret"] = self._new_token()
 
-        copy("appservice.id")
-        copy("appservice.bot_username")
-        copy("appservice.bot_displayname")
-        copy("appservice.bot_avatar")
-
         copy("appservice.community_id")
-
-        copy("appservice.as_token")
-        copy("appservice.hs_token")
 
         copy("metrics.enabled")
         copy("metrics.listen_port")
@@ -84,12 +85,18 @@ class Config(BaseBridgeConfig):
 
         copy("bridge.displayname_preference")
         copy("bridge.displayname_max_length")
+        copy("bridge.allow_avatar_remove")
 
         copy("bridge.max_initial_member_sync")
         copy("bridge.sync_channel_members")
         copy("bridge.skip_deleted_members")
         copy("bridge.startup_sync")
-        copy("bridge.sync_dialog_limit")
+        if "bridge.sync_dialog_limit" in self:
+            base["bridge.sync_create_limit"] = self["bridge.sync_dialog_limit"]
+            base["bridge.sync_update_limit"] = self["bridge.sync_dialog_limit"]
+        else:
+            copy("bridge.sync_update_limit")
+            copy("bridge.sync_create_limit")
         copy("bridge.sync_direct_chats")
         copy("bridge.max_telegram_delete")
         copy("bridge.sync_matrix_state")
@@ -97,10 +104,35 @@ class Config(BaseBridgeConfig):
         copy("bridge.plaintext_highlights")
         copy("bridge.public_portals")
         copy("bridge.sync_with_custom_puppets")
+        copy("bridge.sync_direct_chat_list")
+        copy("bridge.login_shared_secret")
         copy("bridge.telegram_link_preview")
         copy("bridge.inline_images")
         copy("bridge.image_as_file_size")
         copy("bridge.max_document_size")
+        copy("bridge.parallel_file_transfer")
+        copy("bridge.federate_rooms")
+        copy("bridge.animated_sticker.target")
+        copy("bridge.animated_sticker.args")
+        copy("bridge.encryption.allow")
+        copy("bridge.encryption.default")
+        copy("bridge.encryption.database")
+        copy("bridge.encryption.key_sharing.allow")
+        copy("bridge.encryption.key_sharing.require_cross_signing")
+        copy("bridge.encryption.key_sharing.require_verification")
+        copy("bridge.private_chat_portal_meta")
+        copy("bridge.delivery_receipts")
+        copy("bridge.delivery_error_reports")
+        copy("bridge.resend_bridge_info")
+        copy("bridge.backfill.invite_own_puppet")
+        copy("bridge.backfill.takeout_limit")
+        copy("bridge.backfill.initial_limit")
+        copy("bridge.backfill.missed_limit")
+        copy("bridge.backfill.disable_notifications")
+        copy("bridge.backfill.normal_groups")
+
+        copy("bridge.initial_power_level_overrides.group")
+        copy("bridge.initial_power_level_overrides.user")
 
         copy("bridge.bot_messages_as_notices")
         if isinstance(self["bridge.bridge_notices"], bool):
@@ -117,6 +149,7 @@ class Config(BaseBridgeConfig):
         if "bridge.message_formats.m_text" in self:
             del self["bridge.message_formats"]
         copy_dict("bridge.message_formats", override_existing_map=False)
+        copy("bridge.emote_format")
 
         copy("bridge.state_event_formats.join")
         copy("bridge.state_event_formats.leave")
@@ -143,6 +176,11 @@ class Config(BaseBridgeConfig):
         if "bridge.relaybot" not in self:
             copy("bridge.authless_relaybot_portals", "bridge.relaybot.authless_portals")
         else:
+            copy("bridge.relaybot.private_chat.invite")
+            copy("bridge.relaybot.private_chat.state_changes")
+            copy("bridge.relaybot.private_chat.message")
+            copy("bridge.relaybot.group_chat_invite")
+            copy("bridge.relaybot.ignore_unbridged_group_chat")
             copy("bridge.relaybot.authless_portals")
             copy("bridge.relaybot.whitelist_group_admins")
             copy("bridge.relaybot.whitelist")
@@ -175,14 +213,6 @@ class Config(BaseBridgeConfig):
         copy("telegram.proxy.rdns")
         copy("telegram.proxy.username")
         copy("telegram.proxy.password")
-
-        if "appservice.debug" in self and "logging" not in self:
-            level = "DEBUG" if self["appservice.debug"] else "INFO"
-            base["logging.root.level"] = level
-            base["logging.loggers.mau.level"] = level
-            base["logging.loggers.telethon.level"] = level
-        else:
-            copy("logging")
 
     def _get_permissions(self, key: str) -> Permissions:
         level = self["bridge.permissions"].get(key, "")

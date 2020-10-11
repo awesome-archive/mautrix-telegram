@@ -1,5 +1,5 @@
 # mautrix-telegram - A Matrix-Telegram puppeting bridge
-# Copyright (C) 2019 Tulir Asokan
+# Copyright (C) 2020 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,29 +13,47 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 import logging
 import codecs
 import base64
 import re
 
 from telethon.errors import (InviteHashInvalidError, InviteHashExpiredError, OptionsTooMuchError,
-                             UserAlreadyParticipantError, ChatIdInvalidError)
+                             UserAlreadyParticipantError, ChatIdInvalidError,
+                             TakeoutInitDelayError, EmoticonInvalidError)
 from telethon.tl.patched import Message
 from telethon.tl.types import (User as TLUser, TypeUpdates, MessageMediaGame, MessageMediaPoll,
-                               TypePeer)
+                               TypeInputPeer, InputMediaDice)
 from telethon.tl.types.messages import BotCallbackAnswer
 from telethon.tl.functions.messages import (ImportChatInviteRequest, CheckChatInviteRequest,
                                             GetBotCallbackAnswerRequest, SendVoteRequest)
 from telethon.tl.functions.channels import JoinChannelRequest
 
-from mautrix.types import EventID
+from mautrix.types import EventID, Format
 
 from ... import puppet as pu, portal as po
 from ...abstract_user import AbstractUser
 from ...db import Message as DBMessage
 from ...types import TelegramID
-from ...commands import command_handler, CommandEvent, SECTION_MISC, SECTION_CREATING_PORTALS
+from ...commands import (command_handler, CommandEvent, SECTION_MISC, SECTION_CREATING_PORTALS,
+                         SECTION_PORTAL_MANAGEMENT)
+
+
+@command_handler(needs_auth=False,
+                 help_section=SECTION_MISC, help_args="<_caption_>",
+                 help_text="Set a caption for the next image you send")
+async def caption(evt: CommandEvent) -> EventID:
+    if len(evt.args) == 0:
+        return await evt.reply("**Usage:** `$cmdprefix+sp caption <caption>`")
+
+    prefix = f"{evt.command_prefix} caption "
+    if evt.content.format == Format.HTML:
+        evt.content.formatted_body = evt.content.formatted_body.replace(prefix, "", 1)
+    evt.content.body = evt.content.body.replace(prefix, "", 1)
+    evt.sender.command_status = {"caption": evt.content, "action": "Caption"}
+    return await evt.reply("Your next image or file will be sent with that caption. "
+                           "Use `$cmdprefix+sp cancel` to cancel the caption.")
 
 
 @command_handler(help_section=SECTION_MISC,
@@ -76,8 +94,7 @@ async def search(evt: CommandEvent) -> EventID:
     return await evt.reply("\n".join(reply))
 
 
-@command_handler(help_section=SECTION_CREATING_PORTALS,
-                 help_args="<_identifier_>",
+@command_handler(help_section=SECTION_CREATING_PORTALS, help_args="<_identifier_>",
                  help_text="Open a private chat with the given Telegram user. The identifier is "
                            "either the internal user ID, the username or the phone number. "
                            "**N.B.** The phone numbers you start chats with must already be in "
@@ -87,7 +104,8 @@ async def pm(evt: CommandEvent) -> EventID:
         return await evt.reply("**Usage:** `$cmdprefix+sp pm <user identifier>`")
 
     try:
-        user = await evt.sender.client.get_entity(evt.args[0])
+        id = "".join(evt.args).translate({ord(c): None for c in "+()- "})
+        user = await evt.sender.client.get_entity(id)
     except ValueError:
         return await evt.reply("Invalid user identifier or user not found.")
 
@@ -147,7 +165,9 @@ async def join(evt: CommandEvent) -> Optional[EventID]:
             try:
                 await portal.create_matrix_room(evt.sender, chat, [evt.sender.mxid])
             except ChatIdInvalidError as e:
-                logging.getLogger("mau.commands").info(updates.stringify())
+                logging.getLogger("mau.commands").trace("ChatIdInvalidError while creating portal "
+                                                        "from !tg join command: %s",
+                                                        updates.stringify())
                 raise e
             return await evt.reply(f"Created room for {portal.title}")
     return None
@@ -165,8 +185,10 @@ async def sync(evt: CommandEvent) -> EventID:
         sync_only = None
 
     if not sync_only or sync_only == "chats":
-        await evt.sender.sync_dialogs(synchronous_create=True)
+        await evt.reply("Synchronizing chats...")
+        await evt.sender.sync_dialogs()
     if not sync_only or sync_only == "contacts":
+        await evt.reply("Synchronizing contacts...")
         await evt.sender.sync_contacts()
     if not sync_only or sync_only == "me":
         await evt.sender.update_info()
@@ -183,7 +205,7 @@ class MessageIDError(ValueError):
 
 
 async def _parse_encoded_msgid(user: AbstractUser, enc_id: str, type_name: str
-                               ) -> Tuple[TypePeer, Message]:
+                               ) -> Tuple[TypeInputPeer, Message]:
     try:
         enc_id += (4 - len(enc_id) % 4) * "="
         enc_id = base64.b64decode(enc_id)
@@ -212,7 +234,7 @@ async def _parse_encoded_msgid(user: AbstractUser, enc_id: str, type_name: str
     msg = await user.client.get_messages(entity=peer, ids=msg_id)
     if not msg:
         raise MessageIDError(f"Invalid {type_name} ID (message not found)")
-    return peer, msg
+    return peer, cast(Message, msg)
 
 
 @command_handler(help_section=SECTION_MISC,
@@ -234,12 +256,13 @@ async def play(evt: CommandEvent) -> EventID:
     if not isinstance(msg.media, MessageMediaGame):
         return await evt.reply("Invalid play ID (message doesn't look like a game)")
 
-    game = await evt.sender.client(GetBotCallbackAnswerRequest(peer=peer, msg_id=msg.id, game=True))
+    game = await evt.sender.client(
+        GetBotCallbackAnswerRequest(peer=peer, msg_id=msg.id, game=True))
     if not isinstance(game, BotCallbackAnswer):
         return await evt.reply("Game request response invalid")
 
     return await evt.reply(f"Click [here]({game.url}) to play {msg.media.game.title}:\n\n"
-                    f"{msg.media.game.description}")
+                           f"{msg.media.game.description}")
 
 
 @command_handler(help_section=SECTION_MISC,
@@ -287,3 +310,52 @@ async def vote(evt: CommandEvent) -> EventID:
         return await evt.reply("You passed too many options.")
     # TODO use response
     return await evt.mark_read()
+
+
+@command_handler(help_section=SECTION_MISC, help_args="<_emoji_>",
+                 help_text="Roll a dice (\U0001F3B2), kick a football (\u26BD\uFE0F) or throw a "
+                           "dart (\U0001F3AF) or basketball (\U0001F3C0) on the Telegram servers.")
+async def random(evt: CommandEvent) -> EventID:
+    if not evt.is_portal:
+        return await evt.reply("You can only randomize values in portal rooms")
+    portal = po.Portal.get_by_mxid(evt.room_id)
+    arg = evt.args[0] if len(evt.args) > 0 else "dice"
+    emoticon = {
+        "dart": "\U0001F3AF",
+        "dice": "\U0001F3B2",
+        "ball": "\U0001F3C0",
+        "basketball": "\U0001F3C0",
+        "football": "\u26BD",
+        "soccer": "\u26BD",
+    }.get(arg, arg)
+    try:
+        await evt.sender.client.send_media(await portal.get_input_entity(evt.sender),
+                                           InputMediaDice(emoticon))
+    except EmoticonInvalidError:
+        return await evt.reply("Invalid emoji for randomization")
+
+
+@command_handler(help_section=SECTION_PORTAL_MANAGEMENT, help_args="[_limit_]",
+                 help_text="Backfill messages from Telegram history.")
+async def backfill(evt: CommandEvent) -> None:
+    if not evt.is_portal:
+        await evt.reply("You can only use backfill in portal rooms")
+        return
+    try:
+        limit = int(evt.args[0])
+    except (ValueError, IndexError):
+        limit = -1
+    portal = po.Portal.get_by_mxid(evt.room_id)
+    if not evt.config["bridge.backfill.normal_groups"] and portal.peer_type == "chat":
+        await evt.reply("Backfilling normal groups is disabled in the bridge config")
+        return
+    try:
+        await portal.backfill(evt.sender, limit=limit)
+    except TakeoutInitDelayError:
+        msg = ("Please accept the data export request from a mobile device, "
+               "then re-run the backfill command.")
+        if portal.peer_type == "user":
+            from mautrix.appservice import IntentAPI
+            await portal.main_intent.send_notice(evt.room_id, msg)
+        else:
+            await evt.reply(msg)
