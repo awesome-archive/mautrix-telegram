@@ -1,5 +1,5 @@
 # mautrix-telegram - A Matrix-Telegram puppeting bridge
-# Copyright (C) 2019 Tulir Asokan
+# Copyright (C) 2021 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,35 +13,43 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from typing import Iterable
+from __future__ import annotations
 
-from sqlalchemy import Column, Integer, String
-from sqlalchemy.engine.result import RowProxy
+from typing import TYPE_CHECKING, ClassVar
 
-from mautrix.bridge.db import Base
+from asyncpg import Record
+from attr import dataclass
+
+from mautrix.util.async_db import Database
 
 from ..types import TelegramID
 
+fake_db = Database.create("") if TYPE_CHECKING else None
+
 
 # Fucking Telegram not telling bots what chats they are in 3:<
-class BotChat(Base):
-    __tablename__ = "bot_chat"
-    id: TelegramID = Column(Integer, primary_key=True)
-    type: str = Column(String, nullable=False)
+@dataclass
+class BotChat:
+    db: ClassVar[Database] = fake_db
+
+    id: TelegramID
+    type: str
 
     @classmethod
-    def delete_by_id(cls, chat_id: TelegramID) -> None:
-        with cls.db.begin() as conn:
-            conn.execute(cls.t.delete().where(cls.c.id == chat_id))
+    def _from_row(cls, row: Record | None) -> BotChat | None:
+        if row is None:
+            return None
+        return cls(**row)
 
     @classmethod
-    def scan(cls, row: RowProxy) -> 'BotChat':
-        return cls(id=row[0], type=row[1])
+    async def delete_by_id(cls, chat_id: TelegramID) -> None:
+        await cls.db.execute("DELETE FROM bot_chat WHERE id=$1", chat_id)
 
     @classmethod
-    def all(cls) -> Iterable['BotChat']:
-        return cls._select_all()
+    async def all(cls) -> list[BotChat]:
+        rows = await cls.db.fetch("SELECT id, type FROM bot_chat")
+        return [cls._from_row(row) for row in rows]
 
-    def insert(self) -> None:
-        with self.db.begin() as conn:
-            conn.execute(self.t.insert().values(id=self.id, type=self.type))
+    async def insert(self) -> None:
+        q = "INSERT INTO bot_chat (id, type) VALUES ($1, $2)"
+        await self.db.execute(q, self.id, self.type)

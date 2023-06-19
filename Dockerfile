@@ -1,45 +1,55 @@
-FROM docker.io/alpine:3.10
+FROM dock.mau.dev/tulir/lottieconverter:alpine-3.17
 
-ENV UID=1337 \
-    GID=1337 \
-    FFMPEG_BINARY=/usr/bin/ffmpeg
-
-COPY . /opt/mautrix-telegram
-WORKDIR /opt/mautrix-telegram
 RUN apk add --no-cache \
-      py3-virtualenv \
+      python3 py3-pip py3-setuptools py3-wheel \
       py3-pillow \
       py3-aiohttp \
       py3-magic \
-      py3-sqlalchemy \
-      py3-markdown \
-      py3-psycopg2 \
       py3-ruamel.yaml \
+      py3-commonmark \
+      py3-phonenumbers \
+      py3-mako \
+      #py3-prometheus-client \ (pulls in twisted unnecessarily)
       # Indirect dependencies
-      #commonmark
-        py3-future \
-      #alembic
-        py3-mako \
-        py3-dateutil \
-        py3-markupsafe \
-      #moviepy
-        py3-decorator \
-        #py3-tqdm \
-        py3-requests \
-        #imageio
-          py3-numpy \
-      #telethon
-        py3-rsa \
+      py3-idna \
+      py3-rsa \
+      #py3-telethon \ (outdated)
+        py3-pyaes \
+        # cryptg
+          py3-cffi \
+          py3-qrcode \
+      py3-brotli \
       # Other dependencies
-      python3-dev \
-      libffi-dev \
-      build-base \
       ffmpeg \
       ca-certificates \
       su-exec \
- && pip3 install .[fast_crypto,hq_thumbnails,metrics] \
- && pip3 install --upgrade 'https://github.com/LonamiWebs/Telethon/tarball/master#egg=telethon'
+      netcat-openbsd \
+      # encryption
+      py3-olm \
+      py3-pycryptodome \
+      py3-unpaddedbase64 \
+      py3-future \
+      bash \
+      curl \
+      jq \
+      yq
+
+COPY requirements.txt /opt/mautrix-telegram/requirements.txt
+COPY optional-requirements.txt /opt/mautrix-telegram/optional-requirements.txt
+WORKDIR /opt/mautrix-telegram
+RUN apk add --virtual .build-deps python3-dev libffi-dev build-base \
+ && pip3 install /cryptg-*.whl \
+ && pip3 install --no-cache-dir -r requirements.txt -r optional-requirements.txt \
+ && apk del .build-deps \
+ && rm -f /cryptg-*.whl
+
+COPY . /opt/mautrix-telegram
+RUN apk add git && pip3 install --no-cache-dir .[all] && apk del git \
+  # This doesn't make the image smaller, but it's needed so that the `version` command works properly
+  && cp mautrix_telegram/example-config.yaml . && rm -rf mautrix_telegram .git build
 
 VOLUME /data
+ENV UID=1337 GID=1337 \
+    FFMPEG_BINARY=/usr/bin/ffmpeg
 
 CMD ["/opt/mautrix-telegram/docker-run.sh"]

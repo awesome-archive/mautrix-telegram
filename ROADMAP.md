@@ -3,6 +3,7 @@
 * Matrix → Telegram
   * [x] Message content (text, formatting, files, etc..)
   * [x] Message redactions
+  * [x] Message reactions
   * [x] Message edits
   * [ ] ‡ Message history
   * [x] Presence
@@ -12,8 +13,8 @@
   * [x] Power level
     * [x] Normal chats
       * [ ] Non-hardcoded PL requirements
-	* [x] Supergroups/channels
-	  * [ ] Precise bridging (non-hardcoded PL requirements, bridge specific permissions, etc..)
+    * [x] Supergroups/channels
+      * [ ] Precise bridging (non-hardcoded PL requirements, bridge specific permissions, etc..)
   * [x] Membership actions (invite/kick/join/leave)
   * [x] Room metadata changes (name, topic, avatar)
   * [x] Initial room metadata
@@ -23,12 +24,17 @@
 * Telegram → Matrix
   * [x] Message content (text, formatting, files, etc..)
   * [ ] Advanced message content/media
+    * [x] Custom emojis
     * [x] Polls
 	* [x] Games
 	* [ ] Buttons
   * [x] Message deletions
+  * [x] Message reactions
   * [x] Message edits
-  * [ ] Message history
+  * [x] Message history
+    * [x] Manually (`!tg backfill`)
+    * [x] Automatically when creating portal
+    * [x] Automatically for missed messages
   * [x] Avatars
   * [x] Presence
   * [x] Typing notifications
@@ -49,12 +55,12 @@
   * [x] Automatic portal creation
     * [x] At startup
     * [x] When receiving invite or message
-  * [x] Private chat creation by inviting Matrix puppet of Telegram user to new room
-  * [x] Option to use bot to relay messages for unauthenticated Matrix users
-  * [x] Option to use own Matrix account for messages sent from other Telegram clients
+  * [x] Portal creation by inviting Matrix puppet of Telegram user to new room
+  * [x] Option to use bot to relay messages for unauthenticated Matrix users (relaybot)
+  * [x] Option to use own Matrix account for messages sent from other Telegram clients (double puppeting)
   * [ ] ‡ Calls (hard, not yet supported by Telethon)
-  * [ ] ‡ Secret chats (not yet supported by Telethon)
-  * [ ] ‡ E2EE in Matrix rooms (not yet supported 
+  * [ ] ‡ Secret chats (i.e. End-to-bridge encryption on Telegram)
+  * [x] End-to-bridge encryption in Matrix rooms (see [docs](https://docs.mau.fi/bridges/general/end-to-bridge-encryption.html))
 
 † Information not automatically sent from source, i.e. implementation may not be possible  
 ‡ Maybe, i.e. this feature may or may not be implemented at some point

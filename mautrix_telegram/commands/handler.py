@@ -1,5 +1,5 @@
 # mautrix-telegram - A Matrix-Telegram puppeting bridge
-# Copyright (C) 2019 Tulir Asokan
+# Copyright (C) 2021 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,23 +13,37 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""This module contains classes handling commands issued by Matrix users."""
-from typing import Awaitable, Callable, List, Optional, NamedTuple, Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple
 
 from telethon.errors import FloodWaitError
 
-from mautrix.types import RoomID, EventID
-from mautrix.bridge.commands import (HelpSection, CommandEvent as BaseCommandEvent,
-                                     CommandHandler as BaseCommandHandler,
-                                     CommandProcessor as BaseCommandProcessor,
-                                     CommandHandlerFunc, command_handler as base_command_handler)
+from mautrix.bridge.commands import (
+    CommandEvent as BaseCommandEvent,
+    CommandHandler as BaseCommandHandler,
+    CommandHandlerFunc,
+    CommandProcessor as BaseCommandProcessor,
+    HelpSection,
+    command_handler as base_command_handler,
+)
+from mautrix.types import EventID, MessageEventContent, RoomID
+from mautrix.util.format_duration import format_duration
 
-from ..util import format_duration
-from .. import user as u, context as c
+from .. import portal as po, user as u
 
-HelpCacheKey = NamedTuple('HelpCacheKey',
-                          is_management=bool, is_portal=bool, puppet_whitelisted=bool,
-                          matrix_puppet_whitelisted=bool, is_admin=bool, is_logged_in=bool)
+if TYPE_CHECKING:
+    from ..__main__ import TelegramBridge
+
+
+class HelpCacheKey(NamedTuple):
+    is_management: bool
+    is_portal: bool
+    puppet_whitelisted: bool
+    matrix_puppet_whitelisted: bool
+    is_admin: bool
+    is_logged_in: bool
+
 
 SECTION_AUTH = HelpSection("Authentication", 10, "")
 SECTION_CREATING_PORTALS = HelpSection("Creating portals", 20, "")
@@ -40,88 +54,140 @@ SECTION_ADMIN = HelpSection("Administration", 50, "")
 
 class CommandEvent(BaseCommandEvent):
     sender: u.User
+    portal: po.Portal
 
-    def __init__(self, processor: 'CommandProcessor', room_id: RoomID, event_id: EventID,
-                 sender: u.User, command: str, args: List[str], is_management: bool,
-                 is_portal: bool) -> None:
-        super().__init__(processor, room_id, event_id, sender, command, args, is_management,
-                         is_portal)
+    def __init__(
+        self,
+        processor: CommandProcessor,
+        room_id: RoomID,
+        event_id: EventID,
+        sender: u.User,
+        command: str,
+        args: list[str],
+        content: MessageEventContent,
+        portal: po.Portal | None,
+        is_management: bool,
+        has_bridge_bot: bool,
+    ) -> None:
+        super().__init__(
+            processor,
+            room_id,
+            event_id,
+            sender,
+            command,
+            args,
+            content,
+            portal,
+            is_management,
+            has_bridge_bot,
+        )
         self.bridge = processor.bridge
         self.tgbot = processor.tgbot
         self.config = processor.config
         self.public_website = processor.public_website
 
+    @property
+    def print_error_traceback(self) -> bool:
+        return self.sender.is_admin
+
     async def get_help_key(self) -> HelpCacheKey:
-        return HelpCacheKey(self.is_management, self.is_portal, self.sender.puppet_whitelisted,
-                            self.sender.matrix_puppet_whitelisted, self.sender.is_admin,
-                            await self.sender.is_logged_in())
+        return HelpCacheKey(
+            self.is_management,
+            self.portal is not None,
+            self.sender.puppet_whitelisted,
+            self.sender.matrix_puppet_whitelisted,
+            self.sender.is_admin,
+            await self.sender.is_logged_in(),
+        )
 
 
 class CommandHandler(BaseCommandHandler):
     name: str
 
-    management_only: bool
-    needs_auth: bool
     needs_puppeting: bool
     needs_matrix_puppeting: bool
-    needs_admin: bool
 
-    def __init__(self, handler: Callable[[CommandEvent], Awaitable[EventID]],
-                 management_only: bool, name: str, help_text: str, help_args: str,
-                 help_section: HelpSection, needs_auth: bool, needs_puppeting: bool,
-                 needs_matrix_puppeting: bool, needs_admin: bool,) -> None:
-        super().__init__(handler, management_only, name, help_text, help_args, help_section,
-                         needs_auth=needs_auth, needs_puppeting=needs_puppeting,
-                         needs_matrix_puppeting=needs_matrix_puppeting, needs_admin=needs_admin)
+    def __init__(
+        self,
+        handler: Callable[[CommandEvent], Awaitable[EventID]],
+        management_only: bool,
+        name: str,
+        help_text: str,
+        help_args: str,
+        help_section: HelpSection,
+        needs_auth: bool,
+        needs_puppeting: bool,
+        needs_matrix_puppeting: bool,
+        needs_admin: bool,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            handler,
+            management_only,
+            name,
+            help_text,
+            help_args,
+            help_section,
+            needs_auth=needs_auth,
+            needs_puppeting=needs_puppeting,
+            needs_matrix_puppeting=needs_matrix_puppeting,
+            needs_admin=needs_admin,
+            **kwargs,
+        )
 
-    async def get_permission_error(self, evt: CommandEvent) -> Optional[str]:
-        if self.management_only and not evt.is_management:
-            return (f"`{evt.command}` is a restricted command: "
-                    "you may only run it in management rooms.")
-        elif self.needs_puppeting and not evt.sender.puppet_whitelisted:
-            return "This command requires puppeting privileges."
+    async def get_permission_error(self, evt: CommandEvent) -> str | None:
+        if self.needs_puppeting and not evt.sender.puppet_whitelisted:
+            return "That command is limited to users with puppeting privileges."
         elif self.needs_matrix_puppeting and not evt.sender.matrix_puppet_whitelisted:
-            return "This command requires Matrix puppeting privileges."
-        elif self.needs_admin and not evt.sender.is_admin:
-            return "This command requires administrator privileges."
-        elif self.needs_auth and not await evt.sender.is_logged_in():
-            return "This command requires you to be logged in."
-        return None
+            return "That command is limited to users with full puppeting privileges."
+        return await super().get_permission_error(evt)
 
     def has_permission(self, key: HelpCacheKey) -> bool:
-        return ((not self.management_only or key.is_management) and
-                (not self.needs_puppeting or key.puppet_whitelisted) and
-                (not self.needs_matrix_puppeting or key.matrix_puppet_whitelisted) and
-                (not self.needs_admin or key.is_admin) and
-                (not self.needs_auth or key.is_logged_in))
+        return (
+            super().has_permission(key)
+            and (not self.needs_puppeting or key.puppet_whitelisted)
+            and (not self.needs_matrix_puppeting or key.matrix_puppet_whitelisted)
+        )
 
 
-def command_handler(_func: Optional[CommandHandlerFunc] = None, *, needs_auth: bool = True,
-                    needs_puppeting: bool = True, needs_matrix_puppeting: bool = False,
-                    needs_admin: bool = False, management_only: bool = False,
-                    name: Optional[str] = None, help_text: str = "", help_args: str = "",
-                    help_section: HelpSection = None) -> Callable[[CommandHandlerFunc],
-                                                                  CommandHandler]:
+def command_handler(
+    _func: CommandHandlerFunc | None = None,
+    *,
+    needs_auth: bool = True,
+    needs_puppeting: bool = True,
+    needs_matrix_puppeting: bool = False,
+    needs_admin: bool = False,
+    management_only: bool = False,
+    name: str | None = None,
+    help_text: str = "",
+    help_args: str = "",
+    help_section: HelpSection = None,
+) -> Callable[[CommandHandlerFunc], CommandHandler]:
     return base_command_handler(
-        _func, _handler_class=CommandHandler, name=name, help_text=help_text, help_args=help_args,
-        help_section=help_section, management_only=management_only, needs_auth=needs_auth,
-        needs_admin=needs_admin, needs_puppeting=needs_puppeting,
-        needs_matrix_puppeting=needs_matrix_puppeting)
+        _func,
+        _handler_class=CommandHandler,
+        name=name,
+        help_text=help_text,
+        help_args=help_args,
+        help_section=help_section,
+        management_only=management_only,
+        needs_auth=needs_auth,
+        needs_admin=needs_admin,
+        needs_puppeting=needs_puppeting,
+        needs_matrix_puppeting=needs_matrix_puppeting,
+    )
 
 
 class CommandProcessor(BaseCommandProcessor):
-    def __init__(self, context: c.Context) -> None:
-        super().__init__(az=context.az, config=context.config, event_class=CommandEvent,
-                         loop=context.loop)
-        self.tgbot = context.bot
-        self.bridge = context.bridge
-        self.az, self.config, self.loop, self.tgbot = context.core
-        self.public_website = context.public_website
-        self.command_prefix = self.config["bridge.command_prefix"]
+    def __init__(self, bridge: "TelegramBridge") -> None:
+        super().__init__(event_class=CommandEvent, bridge=bridge)
+        self.tgbot = bridge.bot
+        self.public_website = bridge.public_website
 
     @staticmethod
-    async def _run_handler(handler: Callable[[CommandEvent], Awaitable[Any]], evt: CommandEvent
-                           ) -> Any:
+    async def _run_handler(
+        handler: Callable[[CommandEvent], Awaitable[Any]], evt: CommandEvent
+    ) -> Any:
         try:
             return await handler(evt)
         except FloodWaitError as e:

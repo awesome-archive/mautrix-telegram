@@ -1,5 +1,5 @@
 # mautrix-telegram - A Matrix-Telegram puppeting bridge
-# Copyright (C) 2019 Tulir Asokan
+# Copyright (C) 2021 Tulir Asokan
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -13,32 +13,38 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+from __future__ import annotations
+
 from mautrix.types import EventID
 
 from ... import portal as po
 from ...types import TelegramID
-from .. import command_handler, CommandEvent, SECTION_CREATING_PORTALS
-from .util import user_has_power_level, get_initial_state
+from .. import SECTION_CREATING_PORTALS, CommandEvent, command_handler
+from .util import get_initial_state, user_has_power_level, warn_missing_power
 
 
-@command_handler(help_section=SECTION_CREATING_PORTALS,
-                 help_args="[_type_]",
-                 help_text="Create a Telegram chat of the given type for the current Matrix room. "
-                           "The type is either `group`, `supergroup` or `channel` (defaults to "
-                           "`group`).")
+@command_handler(
+    help_section=SECTION_CREATING_PORTALS,
+    help_args="[_type_]",
+    help_text=(
+        "Create a Telegram chat of the given type for the current Matrix room. "
+        "The type is either `group`, `supergroup` or `channel` (defaults to `supergroup`)."
+    ),
+)
 async def create(evt: CommandEvent) -> EventID:
-    type = evt.args[0] if len(evt.args) > 0 else "group"
-    if type not in {"chat", "group", "supergroup", "channel"}:
+    type = evt.args[0] if len(evt.args) > 0 else "supergroup"
+    if type not in ("chat", "group", "supergroup", "channel"):
         return await evt.reply(
-            "**Usage:** `$cmdprefix+sp create ['group'/'supergroup'/'channel']`")
+            "**Usage:** `$cmdprefix+sp create ['group'/'supergroup'/'channel']`"
+        )
 
-    if po.Portal.get_by_mxid(evt.room_id):
+    if await po.Portal.get_by_mxid(evt.room_id):
         return await evt.reply("This is already a portal room.")
 
     if not await user_has_power_level(evt.room_id, evt.az.intent, evt.sender, "bridge"):
         return await evt.reply("You do not have the permissions to bridge this room.")
 
-    title, about, levels = await get_initial_state(evt.az.intent, evt.room_id)
+    title, about, levels, encrypted = await get_initial_state(evt.az.intent, evt.room_id)
     if not title:
         return await evt.reply("Please set a title before creating a Telegram chat.")
 
@@ -50,11 +56,20 @@ async def create(evt: CommandEvent) -> EventID:
         "group": "chat",
     }[type]
 
-    portal = po.Portal(tgid=TelegramID(0), peer_type=type,
-                       mxid=evt.room_id, title=title, about=about)
+    portal = po.Portal(
+        tgid=TelegramID(0),
+        tg_receiver=TelegramID(0),
+        peer_type=type,
+        mxid=evt.room_id,
+        title=title,
+        about=about,
+        encrypted=encrypted,
+    )
+
+    await warn_missing_power(levels, evt)
+
     try:
         await portal.create_telegram_chat(evt.sender, supergroup=supergroup)
     except ValueError as e:
-        portal.delete()
+        await portal.delete()
         return await evt.reply(e.args[0])
-    return await evt.reply(f"Telegram chat created. ID: {portal.tgid}")

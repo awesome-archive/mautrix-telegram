@@ -1,8 +1,26 @@
-from .handler import (command_handler, CommandHandler, CommandProcessor, CommandEvent,
-                      SECTION_AUTH, SECTION_CREATING_PORTALS, SECTION_PORTAL_MANAGEMENT,
-                      SECTION_MISC, SECTION_ADMIN)
-from . import portal, telegram, clean_rooms, matrix_auth, manhole
+from .handler import (
+    SECTION_ADMIN,
+    SECTION_AUTH,
+    SECTION_CREATING_PORTALS,
+    SECTION_MISC,
+    SECTION_PORTAL_MANAGEMENT,
+    CommandEvent,
+    CommandHandler,
+    CommandProcessor,
+    command_handler,
+)
 
-__all__ = ["command_handler", "CommandHandler", "CommandProcessor", "CommandEvent",
-           "SECTION_AUTH", "SECTION_MISC", "SECTION_ADMIN", "SECTION_CREATING_PORTALS",
-           "SECTION_PORTAL_MANAGEMENT"]
+# This has to happen after the handler imports
+from . import matrix_auth, portal, telegram  # isort: skip
+
+__all__ = [
+    "command_handler",
+    "CommandHandler",
+    "CommandProcessor",
+    "CommandEvent",
+    "SECTION_AUTH",
+    "SECTION_MISC",
+    "SECTION_ADMIN",
+    "SECTION_CREATING_PORTALS",
+    "SECTION_PORTAL_MANAGEMENT",
+]
